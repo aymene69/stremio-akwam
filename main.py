@@ -20,8 +20,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-VERSION = "1.0.0"
-isDev = os.getenv("NODE_ENV") == "development"
+VERSION = "1.0.3"
 COMMUNITY_VERSION = os.getenv("IS_COMMUNITY_VERSION") == "true"
 SPONSOR_MESSAGE = os.getenv("SPONSOR_MESSAGE")
 ADDON_ID = os.getenv("ADDON_ID") if os.getenv("ADDON_ID") else "community.aymene69.akwam"
@@ -40,13 +39,11 @@ manifest_data = {
             "type": "Akwam Movies",
             "id": "movie",
             "name": "Akwam Movies",
-            "genres": ["رمضان", "أكشن", "كوميدي", "دراما", "رومانسي", "رعب", "خيال علمي", "فانتازيا", "مغامرة", "جريمة", "تاريخي", "وثائقي", "حربي", "رياضي", "عائلي", "موسيقى", "سيرة ذاتية", "مدبلج", "NETFLIX", "أطفال", "قصير"]
         },
         {
             "type": "Akwam Series",
             "id": "series",
             "name": "Akwam Series",
-            "genres": ["رمضان", "أكشن", "كوميدي", "دراما", "رومانسي", "رعب", "خيال علمي", "فانتازيا", "مغامرة", "جريمة", "تاريخي", "وثائقي", "حربي", "رياضي", "عائلي", "موسيقى", "سيرة ذاتية", "مدبلج", "NETFLIX", "أطفال", "قصير"]
         }
     ],
     "resources": ["stream", "catalog", "meta"],
@@ -225,7 +222,6 @@ async def get_results(
     config: str = None,
     stream_type: str = Path(..., description="Media type"),
     stream_id: str = Path(..., description="ID du contenu"),
-    request: Request = None,
 ):
     print("Getting stream link for", stream_id)
     try:
@@ -367,7 +363,7 @@ async def get_catalog(
     for title, link, thumb, year, tags in paginated_entries:
         metas.append({
             "id": f"akwam{base64.b64encode(title.encode()).decode()}",
-            "type": "movie",
+            "type": catalog_type,
             "name": title,
             "poster": thumb,
             "year": year,
@@ -440,7 +436,7 @@ async def get_catalog_by_genre(
     for title, link, thumb, year, tags in paginated_entries:
         metas.append({
             "id": f"akwam{base64.b64encode(title.encode()).decode()}",
-            "type": "movie" if catalog_type == "movies" else "series",
+            "type": catalog_type,
             "name": title,
             "poster": thumb,
             "year": "2020",
@@ -485,7 +481,7 @@ async def get_catalog(
     for title, link, thumb, year, tags in paginated_entries:
         metas.append({
             "id": f"akwam{base64.b64encode(title.encode()).decode()}",
-            "type": "movie",
+            "type": catalog_type,
             "name": title,
             "poster": thumb,
             "year": 2020,
