@@ -49,7 +49,7 @@ manifest_data = {
             "genres": ["رمضان", "أكشن", "كوميدي", "دراما", "رومانسي", "رعب", "خيال علمي", "فانتازيا", "مغامرة", "جريمة", "تاريخي", "وثائقي", "حربي", "رياضي", "عائلي", "موسيقى", "سيرة ذاتية", "مدبلج", "NETFLIX", "أطفال", "قصير"]
         }
     ],
-    "resources": ["stream", "catalog"],
+    "resources": ["stream", "catalog", "meta"],
     "types": ["movie", "series"],
     "name": "Akwam",
     "description": "Elevate your Stremio experience with seamless access to Akwam links, effortlessly",
@@ -443,8 +443,8 @@ async def get_catalog_by_genre(
             "type": "movie" if catalog_type == "movies" else "series",
             "name": title,
             "poster": thumb,
-            "year": year,
-            "genres": tags,
+            "year": "2020",
+            "genres": "ramadan",
             "background": thumb
         })
     print(f"Returning {len(metas)} metas (skip={skip}, limit={limit})")
@@ -488,8 +488,38 @@ async def get_catalog(
             "type": "movie",
             "name": title,
             "poster": thumb,
-            "year": year,
-            "genres": tags,
+            "year": 2020,
+            "genres": "ramadan",
+            "background": thumb
         })
     print(f"Returning {len(metas)} metas (skip={skip}, limit={limit})")
     return JSONResponse(content={"metas": metas})
+
+@app.get("/meta/{meta_type}/{meta_id}.json")
+@app.get("/{param}/meta/{meta_type}/{meta_id}.json")
+async def get_meta(
+    param: str = None,
+    meta_type: str = Path(..., description="Metadata type"),
+    meta_id: str = Path(..., description="Element ID"),
+):
+    print(f"Fetching metadata for {meta_type} with ID: {meta_id}")
+
+    try:
+        meta_id_decoded = base64.b64decode(meta_id.replace("akwam", "")).decode("utf-8")
+    except Exception:
+        meta_id_decoded = meta_id
+
+    meta = {
+        "id": meta_id,
+        "type": meta_type,
+        "name": meta_id_decoded,
+        "description": f"Watch {meta_id_decoded} on.",
+        "poster": "https://via.placeholder.com/300x450",
+        "background": "https://via.placeholder.com/1920x1080",
+        "year": "2023",
+        "genres": ["Action", "Drama"],
+        "cast": [],
+        "imdbRating": "N/A",
+    }
+
+    return JSONResponse(content={"meta": meta})
