@@ -13,11 +13,6 @@ function setElementDisplay(elementId, displayStatus) {
 
 function getLink(method) {
     const tmdbApi = document.getElementById('tmdb-api-key').value;
-    if (!tmdbApi && method === 'copy') {
-        alert('Please enter your TMDB API key first.');
-        return false;
-    }
-
     const encodedTmdbApi = btoa(tmdbApi);
     const currentUrl = window.location.href;
     const baseUrl = currentUrl.split('/configure')[0];
