@@ -27,7 +27,7 @@ async def add_cors_header(request: Request, call_next):
     response.headers["Access-Control-Allow-Origin"] = "*"
     return response
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 COMMUNITY_VERSION = os.getenv("IS_COMMUNITY_VERSION") == "true"
 SPONSOR_MESSAGE = os.getenv("SPONSOR_MESSAGE")
 ADDON_ID = os.getenv("ADDON_ID") if os.getenv("ADDON_ID") else "community.aymene69.akwam"
