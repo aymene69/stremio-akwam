@@ -30,31 +30,6 @@ HTTP = 'https://'
 
 templates = Jinja2Templates(directory="templates")
 
-manifest_data = {
-    "id": ADDON_ID,
-    "icon": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcTAr_UMfGGxBCd0GKqqW77SMWbYM2nOWPoIwA&s",
-    "version": VERSION,
-    "catalogs": [
-        {
-            "type": "Akwam Movies",
-            "id": "movie",
-            "name": "Akwam Movies",
-        },
-        {
-            "type": "Akwam Series",
-            "id": "series",
-            "name": "Akwam Series",
-        }
-    ],
-    "resources": ["stream", "catalog", "meta"],
-    "types": ["movie", "series"],
-    "name": "Akwam",
-    "description": "Elevate your Stremio experience with seamless access to Akwam links, effortlessly",
-    "behaviorHints": {
-        "configurable": True,
-    }
-}
-
 def get_genres(content_type):
     """Returns genres for a specific content type."""
     genres = {
@@ -75,11 +50,75 @@ def get_genres(content_type):
     }
     return genres.get(content_type, [])
 
+manifest_data = {
+    "id": ADDON_ID,
+    "icon": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcTAr_UMfGGxBCd0GKqqW77SMWbYM2nOWPoIwA&s",
+    "version": VERSION,
+    "catalogs": [
+        {
+            "type": "movie",
+            "id": "akwam-movies",
+            "name": "Akwam Movies",
+            "genres": [genre[0] for genre in get_genres('movie')]
+        },
+        {
+            "type": "series",
+            "id": "akwam-series",
+            "name": "Akwam Series",
+            "genres": [genre[0] for genre in get_genres('series')]
+        },
+        {
+            "type": "movie",
+            "id": "akwam-movies-search",
+            "name": "Akwam Movies",
+            "extra": [{"name": "search", "isRequired": True}]
+        },
+        {
+            "type": "series",
+            "id": "akwam-series-search",
+            "name": "Akwam Series",
+            "extra": [{"name": "search", "isRequired": True}]
+        }
+    ],
+    "resources": ["stream", "catalog", "meta"],
+    "types": ["movie", "series"],
+    "name": "Akwam",
+    "description": "Elevate your Stremio experience with seamless access to Akwam links, effortlessly",
+    "behaviorHints": {
+        "configurable": True,
+    }
+}
+
 def extract_season_episode(title):
     match = re.search(r'Saison (\d+) Épisode (\d+)', title)
     if match:
         return int(match.group(1)), int(match.group(2))
     return 1, 1
+
+def extract_episode_number(title):
+    """Extrait le numéro d'épisode d'un titre arabe ou anglais."""
+    # Patterns pour différents formats
+    patterns = [
+        r'الحلقة\s*(\d+)',  # الحلقة 950
+        r'حلقة\s*(\d+)',     # حلقة 950
+        r'[Ee]pisode\s*(\d+)',  # Episode 123
+        r'[Ee]p\s*(\d+)',       # Ep 123
+        r'E(\d+)',              # E123
+        r'(\d+)',               # Juste un nombre
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, title)
+        if match:
+            return int(match.group(1))
+    return 0
+
+def sort_streams_by_episode(streams):
+    """Trie les streams par numéro d'épisode."""
+    def get_sort_key(stream):
+        return extract_episode_number(stream.get('title', ''))
+    
+    return sorted(streams, key=get_sort_key)
 
 
 def fetch_entries_by_genre(url):
@@ -133,6 +172,7 @@ class Akwam:
         self.cur_page = None
         self.qualities = {}
         self.results = None
+        self.posters = {}
         self.parsed = None
         self.dl_url = None
         self.type = 'movie'
@@ -145,11 +185,36 @@ class Akwam:
 
     def search(self, query, page=1):
         query = query.replace(' ', '+')
-        self.cur_page = get(f'{self.search_url}{query}&section={self.type}&page={page}')
-        self.parse(rf'({self.url}/{self.type}/\d+/.*?)"')
-        self.results = {
-            url.split('/')[-1].replace('-', ' ').title(): url for url in self.parsed[::-1]
-        }
+        search_url = f'{self.search_url}{query}&section={self.type}&page={page}'
+        print(f"🔍 Akwam search URL: {search_url}")
+        self.cur_page = get(search_url)
+        
+        # Scraper les résultats avec BeautifulSoup pour récupérer les images
+        soup = BeautifulSoup(self.cur_page.content, 'html.parser')
+        self.results = {}
+        self.posters = {}  # Dictionnaire pour stocker les posters
+        
+        widget_body = soup.find('div', class_='widget-body row flex-wrap')
+        if widget_body:
+            for item in widget_body.find_all('div', class_='col-lg-auto col-md-4 col-6 mb-12'):
+                entry_box = item.find('div', class_='entry-box')
+                if not entry_box:
+                    continue
+                
+                title_elem = entry_box.find('h3', class_='entry-title')
+                title = title_elem.text.strip() if title_elem else None
+                
+                link_elem = entry_box.find('a', class_='box')
+                link = link_elem['href'] if link_elem else None
+                
+                thumb_elem = entry_box.find('img', class_='img-fluid w-100 lazy')
+                thumb = thumb_elem['data-src'] if thumb_elem and thumb_elem.has_attr('data-src') else (thumb_elem['src'] if thumb_elem else '')
+                
+                if title and link:
+                    self.results[title] = link
+                    self.posters[title] = thumb
+        
+        print(f"🔍 Found {len(self.results)} results from Akwam")
 
     def load(self):
         self.cur_page = get(self.cur_url)
@@ -186,11 +251,36 @@ class Akwam:
 
     def fetch_episodes(self):
         self.cur_page = get(self.cur_url)
-        self.parse(rf'({self.url}/episode/\d+/.*?)"')
-        self.results = {
-            url.split('/')[-1].replace('-', ' ').title(): url \
-                for url in self.parsed[::-1]
-        }
+        soup = BeautifulSoup(self.cur_page.content, 'html.parser')
+        self.results = {}
+        
+        # Trouver tous les épisodes dans le HTML
+        episodes = soup.find_all('div', class_='bg-primary2')
+        
+        for episode in episodes:
+            h2 = episode.find('h2', class_='font-size-18')
+            if not h2:
+                continue
+            
+            link = h2.find('a')
+            if not link:
+                continue
+            
+            url = link.get('href', '')
+            title_text = link.text.strip()
+            
+            # Extraire le numéro d'épisode depuis "حلقة 1 : ..." ou similaire
+            episode_match = re.search(r'حلقة\s*(\d+)', title_text)
+            if episode_match:
+                episode_num = episode_match.group(1)
+                episode_title = f"Episode {episode_num}"
+                self.results[episode_title] = url
+            else:
+                # Fallback: essayer d'extraire depuis l'URL
+                episode_id_match = re.search(r'/episode/(\d+)/', url)
+                if episode_id_match:
+                    episode_title = f"Episode {episode_id_match.group(1)}"
+                    self.results[episode_title] = url
 
 @app.get("/")
 async def root():
@@ -230,84 +320,76 @@ async def get_results(
             title = title.split(":")[0]
         except:
             pass
-        decoded_title = base64.b64decode(title).decode("utf-8")
+        decoded_data = base64.b64decode(title).decode("utf-8")
         is_base64 = True
     except Exception:
         is_base64 = False
 
     if is_base64:
-        print("Seaching for", decoded_title, "in Akwam directly")
-        akwam = Akwam('https://ak.sv/')
-        akwam.type = stream_type
-        akwam.search(decoded_title)
+        # Vérifier si le format contient une URL (nouveau format: "titre::url")
+        if "::" in decoded_data:
+            parts = decoded_data.split("::", 1)
+            decoded_title = parts[0]
+            direct_url = parts[1]
+            print(f"🎯 Direct URL found for '{decoded_title}': {direct_url}")
+            
+            # Utiliser directement l'URL sans refaire de recherche
+            akwam_results = {decoded_title: direct_url}
+        else:
+            # Ancien format : juste le titre, il faut faire une recherche
+            decoded_title = decoded_data
+            print(f"Searching for '{decoded_title}' in Akwam directly (type: {stream_type})")
+            akwam = Akwam('https://ak.sv/')
+            akwam.type = stream_type
+            akwam.search(decoded_title)
+            akwam_results = akwam.results
+            
+            print(f"Found {len(akwam_results)} results for '{decoded_title}'")
+            if akwam_results:
+                print(f"Results: {list(akwam_results.keys())}")
 
         streams = []
         with ThreadPoolExecutor() as executor:
             futures = []
-            for akwam_title, akwam_url in akwam.results.items():
-                akwam.cur_url = akwam_url
+            for akwam_title, akwam_url in akwam_results.items():
                 if stream_type == "series":
-                    akwam.fetch_episodes()
-                    for episode_key, episode_url in akwam.results.items():
-                        futures.append(executor.submit(get_stream_link, akwam, episode_url, episode_key))
+                    # Pour les séries, récupérer d'abord les épisodes
+                    akwam_series = Akwam('https://ak.sv/')
+                    akwam_series.type = stream_type
+                    akwam_series.cur_url = akwam_url
+                    akwam_series.fetch_episodes()
+                    for episode_key, episode_url in akwam_series.results.items():
+                        futures.append(executor.submit(get_stream_link, episode_url, episode_key, stream_type))
                 else:
-                    futures.append(executor.submit(get_stream_link, akwam, akwam_url, akwam_title))
+                    # Pour les films
+                    print(f"Adding movie to process: {akwam_title}")
+                    futures.append(executor.submit(get_stream_link, akwam_url, akwam_title, stream_type))
 
+            print(f"Processing {len(futures)} items...")
             for future in as_completed(futures):
                 try:
                     stream = future.result()
                     if stream:
+                        print(f"Got stream: {stream['title']}")
                         streams.append(stream)
                 except Exception as e:
                     print(f"Error when getting link : {e}")
 
+        # Trier les streams par numéro d'épisode pour les séries
+        if stream_type == "series" and streams:
+            streams = sort_streams_by_episode(streams)
+            print(f"Streams sorted by episode number")
+        
+        print(f"Returning {len(streams)} streams")
         return {
             "streams": streams
         }
 
     else:
-        if stream_type == "series":
-            return []
-
-        if config is None:
-            return {"streams": []}
-
-        tmdb_api_key = base64.b64decode(config).decode("utf-8")
-        print("Searching for", stream_id, "in Akwam using TMDB API")
-        if stream_type == "movie":
-            imdb_id = stream_id.split(".")[0]
-            tmdb_url = f"https://api.themoviedb.org/3/find/{imdb_id}?external_source=imdb_id&api_key={tmdb_api_key}"
-
-        response = get(tmdb_url)
-        data = response.json()
-
-        if stream_type == "movie":
-            movie = data.get("movie_results", [{}])[0]
-            title = movie.get("title")
-            original_title = movie.get("original_title")
-
-        akwam = Akwam('https://ak.sv/')
-        akwam.type = stream_type
-        akwam.search(title)
-
-        if not akwam.results:
-            akwam.search(original_title)
-
-        streams = []
-        for akwam_title, akwam_url in akwam.results.items():
-            akwam.cur_url = akwam_url
-
-            akwam.load()
-            akwam.get_direct_url()
-            if akwam.dl_url:
-                streams.append({
-                    "title": akwam_title,
-                    "url": akwam.dl_url
-                })
-
-        return {
-            "streams": streams
-        }
+        # ID non-Akwam (ex: IMDb, Cinemeta)
+        # Ne pas chercher de liens pour éviter les doublons avec d'autres addons
+        print(f"⚠️ Non-Akwam ID detected: {stream_id} - Skipping")
+        return {"streams": []}
 
 def extract_season_episode(title):
     """Extracts season and episode numbers from a title."""
@@ -316,16 +398,32 @@ def extract_season_episode(title):
         return int(match.group(1)), int(match.group(2))
     return 1, 1
 
-def get_stream_link(akwam, url, title):
+def get_stream_link(url, title, stream_type):
     """Gathers stream link for a given URL."""
-    akwam.cur_url = url
-    akwam.load()
-    akwam.get_direct_url()
-    if akwam.dl_url:
-        return {
-            "title": title,
-            "url": akwam.dl_url
-        }
+    try:
+        # Créer une nouvelle instance Akwam pour chaque thread
+        akwam = Akwam('https://ak.sv/')
+        akwam.type = stream_type
+        akwam.cur_url = url
+        akwam.load()
+        
+        # Essayer différentes qualités jusqu'à en trouver une qui fonctionne
+        for quality in ['1080p', '720p', '480p']:
+            if quality in akwam.qualities:
+                akwam.get_direct_url(quality)
+                if akwam.dl_url:
+                    print(f"✓ Found {quality} link for: {title}")
+                    return {
+                        "title": title,  # Titre sans la qualité
+                        "name": f"Akwam {quality}",  # Nom du provider avec qualité
+                        "url": akwam.dl_url
+                    }
+        
+        print(f"✗ No valid quality found for: {title}")
+    except Exception as e:
+        print(f"✗ Error getting stream link for {title}: {e}")
+        import traceback
+        traceback.print_exc()
     return None
     
 @app.get("/catalog/{catalog_type}/{catalog_id}.json")
@@ -339,11 +437,12 @@ async def get_catalog(
     limit = 24
 
     akwam = Akwam('https://ak.sv/')
-    if catalog_type == "Akwam Movies": catalog_type = "movie"
-    if catalog_type == "Akwam Series": catalog_type = "series"
-
-    if catalog_type == "movie": catalog_type = "movies"
-    genre_url = f'{akwam.url}/{catalog_type}?category=0'
+    # Garder le type Stremio original (movie ou series)
+    stremio_type = catalog_type
+    
+    # Convertir pour l'URL Akwam (movies ou series)
+    akwam_type = "movies" if catalog_type == "movie" else catalog_type
+    genre_url = f'{akwam.url}/{akwam_type}?category=0'
 
     page = (skip // limit) + 1
     genre_url_with_page = f"{genre_url}&page={page}"
@@ -363,7 +462,7 @@ async def get_catalog(
     for title, link, thumb, year, tags in paginated_entries:
         metas.append({
             "id": f"akwam{base64.b64encode(title.encode()).decode()}",
-            "type": catalog_type,
+            "type": stremio_type,  # Utiliser le type Stremio original
             "name": title,
             "poster": thumb,
             "year": year,
@@ -402,8 +501,9 @@ async def get_catalog_by_genre(
 ):
     limit = 24
     akwam = Akwam('https://ak.sv/')
-    if catalog_type == "Akwam Movies": catalog_type = "movie"
-    if catalog_type == "Akwam Series": catalog_type = "series"
+    # Garder le type Stremio original (movie ou series)
+    stremio_type = catalog_type
+    
     genres = get_genres(catalog_type)
 
     genre_id = None
@@ -415,8 +515,9 @@ async def get_catalog_by_genre(
     if not genre_id:
         return JSONResponse(content={"metas": []})
 
-    if catalog_type == "movie": catalog_type = "movies"
-    genre_url = f'{akwam.url}/{catalog_type}?category={genre_id}'
+    # Convertir pour l'URL Akwam (movies ou series)
+    akwam_type = "movies" if catalog_type == "movie" else catalog_type
+    genre_url = f'{akwam.url}/{akwam_type}?category={genre_id}'
 
     page = (skip // limit) + 1
     genre_url_with_page = f"{genre_url}&page={page}"
@@ -436,11 +537,11 @@ async def get_catalog_by_genre(
     for title, link, thumb, year, tags in paginated_entries:
         metas.append({
             "id": f"akwam{base64.b64encode(title.encode()).decode()}",
-            "type": catalog_type,
+            "type": stremio_type,  # Utiliser le type Stremio original
             "name": title,
             "poster": thumb,
-            "year": "2020",
-            "genres": "ramadan",
+            "year": year,
+            "genres": tags,
             "background": thumb
         })
     print(f"Returning {len(metas)} metas (skip={skip}, limit={limit})")
@@ -448,7 +549,7 @@ async def get_catalog_by_genre(
 
 @app.get("/catalog/{catalog_type}/{catalog_id}/skip={skip}.json")
 @app.get("/{param}/catalog/{catalog_type}/{catalog_id}/skip={skip}.json")
-async def get_catalog(
+async def get_catalog_with_skip(
     param: str = None,
     catalog_type: str = Path(..., description="Catalog type (Akwam Movies or Akwam Series)"),
     catalog_id: str = Path(..., description="Catalog ID"),
@@ -457,11 +558,12 @@ async def get_catalog(
     limit = 24
 
     akwam = Akwam('https://ak.sv/')
-    if catalog_type == "Akwam Movies": catalog_type = "movie"
-    if catalog_type == "Akwam Series": catalog_type = "series"
-
-    if catalog_type == "movie": catalog_type = "movies"
-    genre_url = f'{akwam.url}/{catalog_type}?category=0'
+    # Garder le type Stremio original (movie ou series)
+    stremio_type = catalog_type
+    
+    # Convertir pour l'URL Akwam (movies ou series)
+    akwam_type = "movies" if catalog_type == "movie" else catalog_type
+    genre_url = f'{akwam.url}/{akwam_type}?category=0'
 
     page = (skip // limit) + 1
     genre_url_with_page = f"{genre_url}&page={page}"
@@ -481,14 +583,51 @@ async def get_catalog(
     for title, link, thumb, year, tags in paginated_entries:
         metas.append({
             "id": f"akwam{base64.b64encode(title.encode()).decode()}",
-            "type": catalog_type,
+            "type": stremio_type,  # Utiliser le type Stremio original
             "name": title,
             "poster": thumb,
-            "year": 2020,
-            "genres": "ramadan",
+            "year": year,
+            "genres": tags,
             "background": thumb
         })
     print(f"Returning {len(metas)} metas (skip={skip}, limit={limit})")
+    return JSONResponse(content={"metas": metas})
+
+@app.get("/catalog/{catalog_type}/{catalog_id}/search={search_query}.json")
+@app.get("/{param}/catalog/{catalog_type}/{catalog_id}/search={search_query}.json")
+async def get_catalog_search(
+    param: str = None,
+    catalog_type: str = Path(..., description="Catalog type"),
+    catalog_id: str = Path(..., description="Catalog ID"),
+    search_query: str = Path(..., description="Search query"),
+    skip: int = Query(default=0, description="Number of elements to skip"),
+):
+    print(f"Searching Akwam for: '{search_query}' (type: {catalog_type})")
+    limit = 20
+    
+    akwam = Akwam('https://ak.sv/')
+    akwam.type = catalog_type
+    
+    # Calculer la page pour Akwam (ils utilisent aussi la pagination)
+    page = (skip // limit) + 1
+    akwam.search(search_query, page=page)
+    
+    print(f"Found {len(akwam.results)} results for '{search_query}'")
+    
+    metas = []
+    for title, url in list(akwam.results.items())[:limit]:
+        # Stocker l'URL et le titre ensemble pour éviter de perdre l'information
+        # Format: titre::url
+        id_data = f"{title}::{url}"
+        poster = akwam.posters.get(title, "https://via.placeholder.com/300x450?text=No+Image")
+        metas.append({
+            "id": f"akwam{base64.b64encode(id_data.encode()).decode()}",
+            "type": catalog_type,
+            "name": title,
+            "poster": poster,
+        })
+    
+    print(f"Returning {len(metas)} search results")
     return JSONResponse(content={"metas": metas})
 
 @app.get("/meta/{meta_type}/{meta_id}.json")
@@ -505,11 +644,17 @@ async def get_meta(
     except Exception:
         meta_id_decoded = meta_id
 
+    # Si le format contient "titre::url", extraire seulement le titre
+    if "::" in meta_id_decoded:
+        title = meta_id_decoded.split("::", 1)[0]
+    else:
+        title = meta_id_decoded
+
     meta = {
         "id": meta_id,
         "type": meta_type,
-        "name": meta_id_decoded,
-        "description": f"Watch {meta_id_decoded} on.",
+        "name": title,
+        "description": f"Watch {title} on Akwam.",
         "poster": "https://via.placeholder.com/300x450",
         "background": "https://via.placeholder.com/1920x1080",
         "year": "2023",
