@@ -7,20 +7,20 @@ function getLink(method) {
     console.log('Manifest link:', link);
     
     if (method === 'link') {
-        // Ouvrir directement dans Stremio
+        // Open directly in Stremio
         window.open(`stremio://${cleanedLink.replace("//", "/")}`, "_blank");
     } else if (method === 'copy') {
-        // Copier le lien dans le presse-papier
+        // Copy link to clipboard
         if (!navigator.clipboard) {
-            alert('Votre navigateur ne supporte pas le presse-papier');
+            alert('Your browser does not support clipboard');
             console.log(link);
             return;
         }
 
         navigator.clipboard.writeText(link).then(() => {
-            alert('Lien copié dans le presse-papier !');
+            alert('Link copied to clipboard!');
         }, () => {
-            alert('Erreur lors de la copie du lien');
+            alert('Error copying link to clipboard');
         });
     }
 }
