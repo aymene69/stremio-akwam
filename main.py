@@ -20,7 +20,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-VERSION = "1.0.3"
+VERSION = "1.1.0"
 COMMUNITY_VERSION = os.getenv("IS_COMMUNITY_VERSION") == "true"
 SPONSOR_MESSAGE = os.getenv("SPONSOR_MESSAGE")
 ADDON_ID = os.getenv("ADDON_ID") if os.getenv("ADDON_ID") else "community.aymene69.akwam"
