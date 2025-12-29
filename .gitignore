@@ -15,6 +15,9 @@ ENV/
 .env
 .env.local
 
+# Docker backup
+Dockerfile.bak
+
 # OS
 .DS_Store
 Thumbs.db
