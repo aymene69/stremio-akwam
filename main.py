@@ -16,8 +16,65 @@ load_dotenv()
 app = FastAPI()
 
 # Clients HTTP globaux
-http_client = httpx.AsyncClient(timeout=30.0, follow_redirects=True)  # Pour les routes async
-http_client_sync = httpx.Client(timeout=30.0, follow_redirects=True)  # Pour les threads
+http_client = httpx.AsyncClient(timeout=60.0, follow_redirects=True)  # Pour les routes async
+http_client_sync = httpx.Client(timeout=60.0, follow_redirects=True)  # Pour les threads
+
+# Configuration FlareSolverr
+FLARESOLVERR_URL = os.getenv("FLARESOLVERR_LINK", "http://flaresolverr:8191/v1")
+
+class FlareSolverrResponse:
+    """Classe pour simuler une réponse httpx"""
+    def __init__(self, content, status_code, url):
+        self.content = content
+        self.text = content.decode('utf-8') if isinstance(content, bytes) else content
+        self.status_code = status_code
+        self.url = url
+
+async def flaresolverr_get_async(url: str):
+    """Effectue une requête GET via FlareSolverr (async)"""
+    try:
+        payload = {
+            "cmd": "request.get",
+            "url": url,
+            "maxTimeout": 60000
+        }
+        response = await http_client.post(FLARESOLVERR_URL, json=payload)
+        data = response.json()
+        
+        if data.get("status") == "ok":
+            solution = data.get("solution", {})
+            content = solution.get("response", "").encode('utf-8')
+            status = solution.get("status", 200)
+            return FlareSolverrResponse(content, status, url)
+        else:
+            print(f"⚠️ FlareSolverr error: {data.get('message')}")
+            return FlareSolverrResponse(b"", 500, url)
+    except Exception as e:
+        print(f"✗ FlareSolverr request failed for {url}: {e}")
+        return FlareSolverrResponse(b"", 500, url)
+
+def flaresolverr_get_sync(url: str):
+    """Effectue une requête GET via FlareSolverr (sync)"""
+    try:
+        payload = {
+            "cmd": "request.get",
+            "url": url,
+            "maxTimeout": 60000
+        }
+        response = http_client_sync.post(FLARESOLVERR_URL, json=payload)
+        data = response.json()
+        
+        if data.get("status") == "ok":
+            solution = data.get("solution", {})
+            content = solution.get("response", "").encode('utf-8')
+            status = solution.get("status", 200)
+            return FlareSolverrResponse(content, status, url)
+        else:
+            print(f"⚠️ FlareSolverr error: {data.get('message')}")
+            return FlareSolverrResponse(b"", 500, url)
+    except Exception as e:
+        print(f"✗ FlareSolverr request failed for {url}: {e}")
+        return FlareSolverrResponse(b"", 500, url)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -140,7 +197,7 @@ def sort_streams_by_episode(streams):
 async def fetch_entries_by_genre(url):
     """Gather entries for a specific genre (async)."""
     try:
-        response = await http_client.get(url)
+        response = await flaresolverr_get_async(url)
         if response.status_code != 200:
             return []
 
@@ -186,7 +243,7 @@ async def fetch_entries_for_page(url, page):
 
 class Akwam:
     def __init__(self, url):
-        response = http_client_sync.get(url)
+        response = flaresolverr_get_sync(url)
         url = str(response.url)
         self.url = [url, url[:-1]][url[-1] == '/']
         self.search_url = self.url + '/search?q='
@@ -208,7 +265,7 @@ class Akwam:
         query = query.replace(' ', '+')
         search_url = f'{self.search_url}{query}&section={self.type}&page={page}'
         print(f"🔍 Akwam search URL: {search_url}")
-        self.cur_page = http_client_sync.get(search_url)
+        self.cur_page = flaresolverr_get_sync(search_url)
         
         # Scraper les résultats avec BeautifulSoup pour récupérer les images
         soup = BeautifulSoup(self.cur_page.content, 'html.parser')
@@ -238,7 +295,7 @@ class Akwam:
         print(f"🔍 Found {len(self.results)} results from Akwam")
 
     def load(self):
-        self.cur_page = http_client_sync.get(self.cur_url)
+        self.cur_page = flaresolverr_get_sync(self.cur_url)
         self.parse(RGX_QUALITY_TAG, no_multi_line=True)
         i = 0
         for q in ['1080p', '720p', '480p']:
@@ -252,14 +309,14 @@ class Akwam:
             if not quality_url.startswith(('http://', 'https://')):
                 quality_url = HTTP + quality_url
 
-            self.cur_page = http_client_sync.get(quality_url)
+            self.cur_page = flaresolverr_get_sync(quality_url)
             self.parse(r'https?://(\w*\.*\w+\.\w+/download/.*?)"')
 
             download_url = self.parsed[0]
             if not download_url.startswith(('http://', 'https://')):
                 download_url = HTTP + download_url
 
-            self.cur_page = http_client_sync.get(download_url)
+            self.cur_page = flaresolverr_get_sync(download_url)
             self.parse(r'([a-z0-9]{4,}\.\w+\.\w+/download/.*?)"')
 
             final_url = self.parsed[0]
@@ -271,7 +328,7 @@ class Akwam:
             self.dl_url = None
 
     def fetch_episodes(self):
-        self.cur_page = http_client_sync.get(self.cur_url)
+        self.cur_page = flaresolverr_get_sync(self.cur_url)
         soup = BeautifulSoup(self.cur_page.content, 'html.parser')
         self.results = {}
         
@@ -665,7 +722,7 @@ async def scrape_akwam_metadata(akwam_url, media_type='movie'):
     """Scrape les métadonnées directement depuis la page Akwam (async)."""
     try:
         print(f"🔍 Scraping Akwam page: {akwam_url}")
-        response = await http_client.get(akwam_url)
+        response = await flaresolverr_get_async(akwam_url)
         if response.status_code != 200:
             print(f"✗ Failed to fetch Akwam page: {response.status_code}")
             return None

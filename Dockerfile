@@ -9,8 +9,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copier le reste de l'application
 COPY . .
 
-# Port par défaut (sera overridé par $PORT si défini)
+# Variables d'environnement
 ENV PORT=3000
+ENV FLARESOLVERR_LINK=http://flaresolverr:8191/v1
 
 EXPOSE $PORT
 
