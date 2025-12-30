@@ -23,7 +23,9 @@ http_client = httpx.AsyncClient(timeout=60.0, follow_redirects=True)  # Pour les
 http_client_sync = httpx.Client(timeout=60.0, follow_redirects=True)  # Pour les threads
 
 # Configuration FlareSolverr
+FLARESOLVERR_ENABLE = os.getenv("FLARESOLVERR_ENABLE", "true").lower() == "true"
 FLARESOLVERR_URL = os.getenv("FLARESOLVERR_LINK", "http://flaresolverr:8191/v1")
+FLARESOLVERR_AUTO = os.getenv("FLARESOLVERR_AUTO", "true").lower() == "true"  # Utiliser FlareSolverr seulement si challenge détecté
 
 # Cache simple en mémoire avec expiration
 _cache = {}
@@ -55,6 +57,31 @@ def set_cache(key, value):
 def make_cache_key(url):
     """Crée une clé de cache à partir d'une URL."""
     return hashlib.md5(url.encode()).hexdigest()
+
+def is_cloudflare_challenge(response_content, status_code):
+    """Détecte si la réponse contient un challenge Cloudflare."""
+    # Codes HTTP typiques de Cloudflare
+    if status_code in [403, 503, 429]:
+        return True
+    
+    # Vérifier le contenu de la page
+    if isinstance(response_content, bytes):
+        content_str = response_content.decode('utf-8', errors='ignore').lower()
+    else:
+        content_str = str(response_content).lower()
+    
+    # Signatures Cloudflare
+    cloudflare_signatures = [
+        'challenge-platform',
+        'cloudflare',
+        'cf-wrapper',
+        'cf_chl_opt',
+        'checking your browser',
+        'just a moment',
+        '__cf_chl_jschl_tk__'
+    ]
+    
+    return any(sig in content_str for sig in cloudflare_signatures)
 
 async def get_or_create_session():
     """Obtient ou crée une session FlareSolverr persistante."""
@@ -183,24 +210,62 @@ class FlareSolverrResponse:
         self.url = url
 
 async def flaresolverr_get_async(url: str):
-    """Effectue une requête GET via FlareSolverr (async) avec cache et session persistante"""
+    """Effectue une requête GET, utilise FlareSolverr seulement si challenge Cloudflare détecté"""
     # Vérifier le cache d'abord
     cache_key = make_cache_key(url)
     cached_response = get_cache(cache_key)
     if cached_response:
         return cached_response
     
+    # Si FlareSolverr est complètement désactivé
+    if not FLARESOLVERR_ENABLE:
+        try:
+            print(f"📡 HTTP direct (FlareSolverr désactivé)")
+            response = await http_client.get(url)
+            result = FlareSolverrResponse(response.content, response.status_code, str(response.url))
+            set_cache(cache_key, result)
+            return result
+        except Exception as e:
+            print(f"✗ HTTP direct échoué: {e}")
+            return FlareSolverrResponse(b"", 500, url)
+    
+    # Mode AUTO : essayer HTTP d'abord, FlareSolverr si challenge détecté
+    if FLARESOLVERR_AUTO:
+        try:
+            print(f"📡 Tentative HTTP direct...")
+            response = await http_client.get(url)
+            
+            # Vérifier si c'est un challenge Cloudflare
+            if is_cloudflare_challenge(response.content, response.status_code):
+                print(f"🛡️ Challenge Cloudflare détecté ! Utilisation de FlareSolverr...")
+                # Utiliser FlareSolverr
+                return await _flaresolverr_request_async(url, cache_key)
+            else:
+                # Pas de challenge, utiliser la réponse HTTP directe
+                print(f"✓ HTTP direct réussi (pas de challenge)")
+                result = FlareSolverrResponse(response.content, response.status_code, str(response.url))
+                set_cache(cache_key, result)
+                return result
+                
+        except Exception as e:
+            print(f"⚠️ HTTP direct échoué, tentative avec FlareSolverr: {e}")
+            return await _flaresolverr_request_async(url, cache_key)
+    
+    # Mode FORCE : toujours utiliser FlareSolverr
+    print(f"🔧 FlareSolverr forcé (FLARESOLVERR_AUTO=false)")
+    return await _flaresolverr_request_async(url, cache_key)
+
+async def _flaresolverr_request_async(url: str, cache_key: str):
+    """Fonction interne pour effectuer une requête FlareSolverr"""
     try:
-        # Obtenir ou créer une session (garde les cookies Cloudflare)
         session_id = await get_or_create_session()
         
         payload = {
             "cmd": "request.get",
             "url": url,
-            "maxTimeout": 30000  # Réduit de 60s à 30s
+            "maxTimeout": 30000
         }
         
-        # Ajouter la session si elle existe
         if session_id:
             payload["session"] = session_id
         
@@ -212,39 +277,75 @@ async def flaresolverr_get_async(url: str):
             content = solution.get("response", "").encode('utf-8')
             status = solution.get("status", 200)
             result = FlareSolverrResponse(content, status, url)
-            # Mettre en cache le résultat
             set_cache(cache_key, result)
-            print(f"✓ Requête réussie avec session (cookies Cloudflare conservés)")
+            print(f"✓ FlareSolverr réussi (cookies conservés)")
             return result
         else:
             print(f"⚠️ FlareSolverr error: {data.get('message')}")
-            # Si erreur de session, on la détruit pour en créer une nouvelle
             if "session" in data.get("message", "").lower():
                 await destroy_session()
             return FlareSolverrResponse(b"", 500, url)
     except Exception as e:
-        print(f"✗ FlareSolverr request failed for {url}: {e}")
+        print(f"✗ FlareSolverr échoué: {e}")
         return FlareSolverrResponse(b"", 500, url)
 
 def flaresolverr_get_sync(url: str):
-    """Effectue une requête GET via FlareSolverr (sync) avec cache et session persistante"""
+    """Effectue une requête GET, utilise FlareSolverr seulement si challenge Cloudflare détecté"""
     # Vérifier le cache d'abord
     cache_key = make_cache_key(url)
     cached_response = get_cache(cache_key)
     if cached_response:
         return cached_response
     
+    # Si FlareSolverr est complètement désactivé
+    if not FLARESOLVERR_ENABLE:
+        try:
+            print(f"📡 HTTP direct (FlareSolverr désactivé)")
+            response = http_client_sync.get(url)
+            result = FlareSolverrResponse(response.content, response.status_code, str(response.url))
+            set_cache(cache_key, result)
+            return result
+        except Exception as e:
+            print(f"✗ HTTP direct échoué: {e}")
+            return FlareSolverrResponse(b"", 500, url)
+    
+    # Mode AUTO : essayer HTTP d'abord, FlareSolverr si challenge détecté
+    if FLARESOLVERR_AUTO:
+        try:
+            print(f"📡 Tentative HTTP direct...")
+            response = http_client_sync.get(url)
+            
+            # Vérifier si c'est un challenge Cloudflare
+            if is_cloudflare_challenge(response.content, response.status_code):
+                print(f"🛡️ Challenge Cloudflare détecté ! Utilisation de FlareSolverr...")
+                # Utiliser FlareSolverr
+                return _flaresolverr_request_sync(url, cache_key)
+            else:
+                # Pas de challenge, utiliser la réponse HTTP directe
+                print(f"✓ HTTP direct réussi (pas de challenge)")
+                result = FlareSolverrResponse(response.content, response.status_code, str(response.url))
+                set_cache(cache_key, result)
+                return result
+                
+        except Exception as e:
+            print(f"⚠️ HTTP direct échoué, tentative avec FlareSolverr: {e}")
+            return _flaresolverr_request_sync(url, cache_key)
+    
+    # Mode FORCE : toujours utiliser FlareSolverr
+    print(f"🔧 FlareSolverr forcé (FLARESOLVERR_AUTO=false)")
+    return _flaresolverr_request_sync(url, cache_key)
+
+def _flaresolverr_request_sync(url: str, cache_key: str):
+    """Fonction interne pour effectuer une requête FlareSolverr (sync)"""
     try:
-        # Obtenir ou créer une session (garde les cookies Cloudflare)
         session_id = get_or_create_session_sync()
         
         payload = {
             "cmd": "request.get",
             "url": url,
-            "maxTimeout": 30000  # Réduit de 60s à 30s
+            "maxTimeout": 30000
         }
         
-        # Ajouter la session si elle existe
         if session_id:
             payload["session"] = session_id
         
@@ -256,18 +357,16 @@ def flaresolverr_get_sync(url: str):
             content = solution.get("response", "").encode('utf-8')
             status = solution.get("status", 200)
             result = FlareSolverrResponse(content, status, url)
-            # Mettre en cache le résultat
             set_cache(cache_key, result)
-            print(f"✓ Requête réussie avec session (cookies Cloudflare conservés)")
+            print(f"✓ FlareSolverr réussi (cookies conservés)")
             return result
         else:
             print(f"⚠️ FlareSolverr error: {data.get('message')}")
-            # Si erreur de session, on la détruit pour en créer une nouvelle
             if "session" in data.get("message", "").lower():
                 destroy_session_sync()
             return FlareSolverrResponse(b"", 500, url)
     except Exception as e:
-        print(f"✗ FlareSolverr request failed for {url}: {e}")
+        print(f"✗ FlareSolverr échoué: {e}")
         return FlareSolverrResponse(b"", 500, url)
 app.add_middleware(
     CORSMiddleware,
@@ -283,7 +382,7 @@ async def add_cors_header(request: Request, call_next):
     response.headers["Access-Control-Allow-Origin"] = "*"
     return response
 
-VERSION = "1.1.5"
+VERSION = "1.1.6"
 COMMUNITY_VERSION = os.getenv("IS_COMMUNITY_VERSION") == "true"
 SPONSOR_MESSAGE = os.getenv("SPONSOR_MESSAGE")
 ADDON_ID = os.getenv("ADDON_ID") if os.getenv("ADDON_ID") else "community.aymene69.akwam"
