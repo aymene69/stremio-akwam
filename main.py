@@ -10,6 +10,9 @@ import asyncio
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from bs4 import BeautifulSoup
+from functools import lru_cache
+from datetime import datetime, timedelta
+import hashlib
 
 load_dotenv()
 
@@ -22,6 +25,155 @@ http_client_sync = httpx.Client(timeout=60.0, follow_redirects=True)  # Pour les
 # Configuration FlareSolverr
 FLARESOLVERR_URL = os.getenv("FLARESOLVERR_LINK", "http://flaresolverr:8191/v1")
 
+# Cache simple en mémoire avec expiration
+_cache = {}
+_cache_expiry = {}
+CACHE_TTL = int(os.getenv("CACHE_TTL_SECONDS", 3600))  # 1 heure par défaut
+
+# Gestion des sessions FlareSolverr (garde les cookies Cloudflare)
+_flaresolverr_session_id = None
+_session_last_used = None
+SESSION_TIMEOUT = 600  # 10 minutes d'inactivité max
+
+def get_cache(key):
+    """Récupère une valeur du cache si elle existe et n'est pas expirée."""
+    if key in _cache and key in _cache_expiry:
+        if datetime.now() < _cache_expiry[key]:
+            print(f"✓ Cache hit for: {key[:50]}...")
+            return _cache[key]
+        else:
+            # Expirée, on la supprime
+            del _cache[key]
+            del _cache_expiry[key]
+    return None
+
+def set_cache(key, value):
+    """Stocke une valeur dans le cache avec expiration."""
+    _cache[key] = value
+    _cache_expiry[key] = datetime.now() + timedelta(seconds=CACHE_TTL)
+
+def make_cache_key(url):
+    """Crée une clé de cache à partir d'une URL."""
+    return hashlib.md5(url.encode()).hexdigest()
+
+async def get_or_create_session():
+    """Obtient ou crée une session FlareSolverr persistante."""
+    global _flaresolverr_session_id, _session_last_used
+    
+    now = datetime.now()
+    
+    # Si on a déjà une session et qu'elle n'est pas expirée, la réutiliser
+    if _flaresolverr_session_id and _session_last_used:
+        time_since_last_use = (now - _session_last_used).total_seconds()
+        if time_since_last_use < SESSION_TIMEOUT:
+            _session_last_used = now
+            print(f"♻️ Réutilisation de la session FlareSolverr: {_flaresolverr_session_id}")
+            return _flaresolverr_session_id
+        else:
+            print(f"⏰ Session expirée après {time_since_last_use:.0f}s d'inactivité")
+            await destroy_session()
+    
+    # Créer une nouvelle session
+    try:
+        session_name = f"akwam_session_{int(now.timestamp())}"
+        payload = {
+            "cmd": "sessions.create",
+            "session": session_name
+        }
+        response = await http_client.post(FLARESOLVERR_URL, json=payload)
+        data = response.json()
+        
+        if data.get("status") == "ok":
+            _flaresolverr_session_id = data.get("session")
+            _session_last_used = now
+            print(f"✓ Nouvelle session FlareSolverr créée: {_flaresolverr_session_id}")
+            return _flaresolverr_session_id
+        else:
+            print(f"⚠️ Échec création session: {data.get('message')}")
+            return None
+    except Exception as e:
+        print(f"✗ Erreur création session: {e}")
+        return None
+
+async def destroy_session():
+    """Détruit la session FlareSolverr actuelle."""
+    global _flaresolverr_session_id, _session_last_used
+    
+    if not _flaresolverr_session_id:
+        return
+    
+    try:
+        payload = {
+            "cmd": "sessions.destroy",
+            "session": _flaresolverr_session_id
+        }
+        await http_client.post(FLARESOLVERR_URL, json=payload)
+        print(f"🗑️ Session détruite: {_flaresolverr_session_id}")
+    except Exception as e:
+        print(f"⚠️ Erreur destruction session: {e}")
+    finally:
+        _flaresolverr_session_id = None
+        _session_last_used = None
+
+def get_or_create_session_sync():
+    """Version synchrone pour obtenir/créer une session."""
+    global _flaresolverr_session_id, _session_last_used
+    
+    now = datetime.now()
+    
+    # Si on a déjà une session et qu'elle n'est pas expirée, la réutiliser
+    if _flaresolverr_session_id and _session_last_used:
+        time_since_last_use = (now - _session_last_used).total_seconds()
+        if time_since_last_use < SESSION_TIMEOUT:
+            _session_last_used = now
+            print(f"♻️ Réutilisation de la session FlareSolverr: {_flaresolverr_session_id}")
+            return _flaresolverr_session_id
+        else:
+            print(f"⏰ Session expirée après {time_since_last_use:.0f}s d'inactivité")
+            destroy_session_sync()
+    
+    # Créer une nouvelle session
+    try:
+        session_name = f"akwam_session_{int(now.timestamp())}"
+        payload = {
+            "cmd": "sessions.create",
+            "session": session_name
+        }
+        response = http_client_sync.post(FLARESOLVERR_URL, json=payload)
+        data = response.json()
+        
+        if data.get("status") == "ok":
+            _flaresolverr_session_id = data.get("session")
+            _session_last_used = now
+            print(f"✓ Nouvelle session FlareSolverr créée: {_flaresolverr_session_id}")
+            return _flaresolverr_session_id
+        else:
+            print(f"⚠️ Échec création session: {data.get('message')}")
+            return None
+    except Exception as e:
+        print(f"✗ Erreur création session: {e}")
+        return None
+
+def destroy_session_sync():
+    """Version synchrone pour détruire la session."""
+    global _flaresolverr_session_id, _session_last_used
+    
+    if not _flaresolverr_session_id:
+        return
+    
+    try:
+        payload = {
+            "cmd": "sessions.destroy",
+            "session": _flaresolverr_session_id
+        }
+        http_client_sync.post(FLARESOLVERR_URL, json=payload)
+        print(f"🗑️ Session détruite: {_flaresolverr_session_id}")
+    except Exception as e:
+        print(f"⚠️ Erreur destruction session: {e}")
+    finally:
+        _flaresolverr_session_id = None
+        _session_last_used = None
+
 class FlareSolverrResponse:
     """Classe pour simuler une réponse httpx"""
     def __init__(self, content, status_code, url):
@@ -31,13 +183,27 @@ class FlareSolverrResponse:
         self.url = url
 
 async def flaresolverr_get_async(url: str):
-    """Effectue une requête GET via FlareSolverr (async)"""
+    """Effectue une requête GET via FlareSolverr (async) avec cache et session persistante"""
+    # Vérifier le cache d'abord
+    cache_key = make_cache_key(url)
+    cached_response = get_cache(cache_key)
+    if cached_response:
+        return cached_response
+    
     try:
+        # Obtenir ou créer une session (garde les cookies Cloudflare)
+        session_id = await get_or_create_session()
+        
         payload = {
             "cmd": "request.get",
             "url": url,
-            "maxTimeout": 60000
+            "maxTimeout": 30000  # Réduit de 60s à 30s
         }
+        
+        # Ajouter la session si elle existe
+        if session_id:
+            payload["session"] = session_id
+        
         response = await http_client.post(FLARESOLVERR_URL, json=payload)
         data = response.json()
         
@@ -45,22 +211,43 @@ async def flaresolverr_get_async(url: str):
             solution = data.get("solution", {})
             content = solution.get("response", "").encode('utf-8')
             status = solution.get("status", 200)
-            return FlareSolverrResponse(content, status, url)
+            result = FlareSolverrResponse(content, status, url)
+            # Mettre en cache le résultat
+            set_cache(cache_key, result)
+            print(f"✓ Requête réussie avec session (cookies Cloudflare conservés)")
+            return result
         else:
             print(f"⚠️ FlareSolverr error: {data.get('message')}")
+            # Si erreur de session, on la détruit pour en créer une nouvelle
+            if "session" in data.get("message", "").lower():
+                await destroy_session()
             return FlareSolverrResponse(b"", 500, url)
     except Exception as e:
         print(f"✗ FlareSolverr request failed for {url}: {e}")
         return FlareSolverrResponse(b"", 500, url)
 
 def flaresolverr_get_sync(url: str):
-    """Effectue une requête GET via FlareSolverr (sync)"""
+    """Effectue une requête GET via FlareSolverr (sync) avec cache et session persistante"""
+    # Vérifier le cache d'abord
+    cache_key = make_cache_key(url)
+    cached_response = get_cache(cache_key)
+    if cached_response:
+        return cached_response
+    
     try:
+        # Obtenir ou créer une session (garde les cookies Cloudflare)
+        session_id = get_or_create_session_sync()
+        
         payload = {
             "cmd": "request.get",
             "url": url,
-            "maxTimeout": 60000
+            "maxTimeout": 30000  # Réduit de 60s à 30s
         }
+        
+        # Ajouter la session si elle existe
+        if session_id:
+            payload["session"] = session_id
+        
         response = http_client_sync.post(FLARESOLVERR_URL, json=payload)
         data = response.json()
         
@@ -68,9 +255,16 @@ def flaresolverr_get_sync(url: str):
             solution = data.get("solution", {})
             content = solution.get("response", "").encode('utf-8')
             status = solution.get("status", 200)
-            return FlareSolverrResponse(content, status, url)
+            result = FlareSolverrResponse(content, status, url)
+            # Mettre en cache le résultat
+            set_cache(cache_key, result)
+            print(f"✓ Requête réussie avec session (cookies Cloudflare conservés)")
+            return result
         else:
             print(f"⚠️ FlareSolverr error: {data.get('message')}")
+            # Si erreur de session, on la détruit pour en créer une nouvelle
+            if "session" in data.get("message", "").lower():
+                destroy_session_sync()
             return FlareSolverrResponse(b"", 500, url)
     except Exception as e:
         print(f"✗ FlareSolverr request failed for {url}: {e}")
@@ -89,7 +283,7 @@ async def add_cors_header(request: Request, call_next):
     response.headers["Access-Control-Allow-Origin"] = "*"
     return response
 
-VERSION = "1.1.2"
+VERSION = "1.1.5"
 COMMUNITY_VERSION = os.getenv("IS_COMMUNITY_VERSION") == "true"
 SPONSOR_MESSAGE = os.getenv("SPONSOR_MESSAGE")
 ADDON_ID = os.getenv("ADDON_ID") if os.getenv("ADDON_ID") else "community.aymene69.akwam"
@@ -364,6 +558,51 @@ class Akwam:
 async def root():
     return RedirectResponse(url="/configure")
 
+@app.get("/cache/stats")
+async def cache_stats():
+    """Retourne les statistiques du cache et de la session."""
+    total_entries = len(_cache)
+    total_expired = sum(1 for key in _cache_expiry if datetime.now() >= _cache_expiry[key])
+    total_valid = total_entries - total_expired
+    
+    session_info = {
+        "active": _flaresolverr_session_id is not None,
+        "session_id": _flaresolverr_session_id,
+        "last_used_seconds_ago": None
+    }
+    
+    if _session_last_used:
+        session_info["last_used_seconds_ago"] = int((datetime.now() - _session_last_used).total_seconds())
+    
+    return JSONResponse(content={
+        "cache": {
+            "total_entries": total_entries,
+            "valid_entries": total_valid,
+            "expired_entries": total_expired,
+            "cache_ttl_seconds": CACHE_TTL,
+            "memory_usage_estimate_mb": round(sum(len(str(v)) for v in _cache.values()) / 1024 / 1024, 2)
+        },
+        "session": session_info
+    })
+
+@app.post("/cache/clear")
+async def clear_cache():
+    """Vide le cache complètement."""
+    count = len(_cache)
+    _cache.clear()
+    _cache_expiry.clear()
+    return JSONResponse(content={"message": "Cache cleared successfully", "entries_removed": count})
+
+@app.post("/session/refresh")
+async def refresh_session():
+    """Détruit et recrée la session FlareSolverr."""
+    await destroy_session()
+    new_session = await get_or_create_session()
+    return JSONResponse(content={
+        "message": "Session refreshed",
+        "new_session_id": new_session
+    })
+
 @app.get("/configure")
 @app.get("/{params}/configure")
 async def configure(request: Request):
@@ -427,7 +666,9 @@ async def get_results(
                 print(f"Results: {list(akwam_results.keys())}")
 
         streams = []
-        with ThreadPoolExecutor() as executor:
+        # Limiter à 3 threads max pour éviter de surcharger FlareSolverr
+        max_workers = int(os.getenv("MAX_WORKERS", 3))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = []
             for akwam_title, akwam_url in akwam_results.items():
                 # Détecter si on a un lien direct vers un épisode spécifique
