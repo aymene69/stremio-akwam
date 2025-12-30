@@ -5,7 +5,8 @@ from fastapi.responses import JSONResponse, RedirectResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.templating import Jinja2Templates
 from dotenv import load_dotenv
-from requests import get
+import httpx
+import asyncio
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from bs4 import BeautifulSoup
@@ -13,6 +14,10 @@ from bs4 import BeautifulSoup
 load_dotenv()
 
 app = FastAPI()
+
+# Clients HTTP globaux
+http_client = httpx.AsyncClient(timeout=30.0, follow_redirects=True)  # Pour les routes async
+http_client_sync = httpx.Client(timeout=30.0, follow_redirects=True)  # Pour les threads
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -27,7 +32,7 @@ async def add_cors_header(request: Request, call_next):
     response.headers["Access-Control-Allow-Origin"] = "*"
     return response
 
-VERSION = "1.1.1"
+VERSION = "1.1.2"
 COMMUNITY_VERSION = os.getenv("IS_COMMUNITY_VERSION") == "true"
 SPONSOR_MESSAGE = os.getenv("SPONSOR_MESSAGE")
 ADDON_ID = os.getenv("ADDON_ID") if os.getenv("ADDON_ID") else "community.aymene69.akwam"
@@ -128,52 +133,57 @@ def sort_streams_by_episode(streams):
     return sorted(streams, key=get_sort_key)
 
 
-def fetch_entries_by_genre(url):
-    """Gather entries for a specific genre."""
-    response = get(url)
-    if response.status_code != 200:
+async def fetch_entries_by_genre(url):
+    """Gather entries for a specific genre (async)."""
+    try:
+        response = await http_client.get(url)
+        if response.status_code != 200:
+            return []
+
+        soup = BeautifulSoup(response.content, 'html.parser')
+        entries = []
+
+        widget_body = soup.find('div', class_='widget-body row flex-wrap')
+        if not widget_body:
+            return []
+
+        for item in widget_body.find_all('div', class_='col-lg-auto col-md-4 col-6 mb-12'):
+            entry_box = item.find('div', class_='entry-box')
+            if not entry_box:
+                continue
+
+            title_elem = entry_box.find('h3', class_='entry-title')
+            title = title_elem.text.strip() if title_elem else 'No Title'
+
+            link_elem = entry_box.find('a', class_='box')
+            link = link_elem['href'] if link_elem else '#'
+
+            thumb_elem = entry_box.find('img', class_='img-fluid w-100 lazy')
+            thumb = thumb_elem['data-src'] if thumb_elem and thumb_elem.has_attr('data-src') else thumb_elem['src'] if thumb_elem else ''
+
+            year_elem = entry_box.find('span', class_='badge badge-pill badge-secondary')
+            year = year_elem.text.strip() if year_elem else 'N/A'
+
+            tags = []
+            for tag_elem in entry_box.find_all('span', class_='badge badge-pill badge-light'):
+                tags.append(tag_elem.text.strip())
+
+            entries.append((title, link, thumb, year, tags))
+
+        return entries
+    except Exception as e:
+        print(f"Error fetching entries: {e}")
         return []
 
-    soup = BeautifulSoup(response.content, 'html.parser')
-    entries = []
-
-    widget_body = soup.find('div', class_='widget-body row flex-wrap')
-    if not widget_body:
-        return []
-
-    for item in widget_body.find_all('div', class_='col-lg-auto col-md-4 col-6 mb-12'):
-        entry_box = item.find('div', class_='entry-box')
-        if not entry_box:
-            continue
-
-        title_elem = entry_box.find('h3', class_='entry-title')
-        title = title_elem.text.strip() if title_elem else 'No Title'
-
-        link_elem = entry_box.find('a', class_='box')
-        link = link_elem['href'] if link_elem else '#'
-
-        thumb_elem = entry_box.find('img', class_='img-fluid w-100 lazy')
-        thumb = thumb_elem['data-src'] if thumb_elem and thumb_elem.has_attr('data-src') else thumb_elem['src'] if thumb_elem else ''
-
-        year_elem = entry_box.find('span', class_='badge badge-pill badge-secondary')
-        year = year_elem.text.strip() if year_elem else 'N/A'
-
-        tags = []
-        for tag_elem in entry_box.find_all('span', class_='badge badge-pill badge-light'):
-            tags.append(tag_elem.text.strip())
-
-        entries.append((title, link, thumb, year, tags))
-
-    return entries
-
-def fetch_entries_for_page(url, page):
-    """Fetch entries for a specific page."""
+async def fetch_entries_for_page(url, page):
+    """Fetch entries for a specific page (async)."""
     page_url = f"{url}&page={page}"
-    return fetch_entries_by_genre(page_url)
+    return await fetch_entries_by_genre(page_url)
 
 class Akwam:
     def __init__(self, url):
-        url = get(url).url
+        response = http_client_sync.get(url)
+        url = str(response.url)
         self.url = [url, url[:-1]][url[-1] == '/']
         self.search_url = self.url + '/search?q='
         self.cur_page = None
@@ -194,7 +204,7 @@ class Akwam:
         query = query.replace(' ', '+')
         search_url = f'{self.search_url}{query}&section={self.type}&page={page}'
         print(f"🔍 Akwam search URL: {search_url}")
-        self.cur_page = get(search_url)
+        self.cur_page = http_client_sync.get(search_url)
         
         # Scraper les résultats avec BeautifulSoup pour récupérer les images
         soup = BeautifulSoup(self.cur_page.content, 'html.parser')
@@ -224,7 +234,7 @@ class Akwam:
         print(f"🔍 Found {len(self.results)} results from Akwam")
 
     def load(self):
-        self.cur_page = get(self.cur_url)
+        self.cur_page = http_client_sync.get(self.cur_url)
         self.parse(RGX_QUALITY_TAG, no_multi_line=True)
         i = 0
         for q in ['1080p', '720p', '480p']:
@@ -238,14 +248,14 @@ class Akwam:
             if not quality_url.startswith(('http://', 'https://')):
                 quality_url = HTTP + quality_url
 
-            self.cur_page = get(quality_url)
+            self.cur_page = http_client_sync.get(quality_url)
             self.parse(r'https?://(\w*\.*\w+\.\w+/download/.*?)"')
 
             download_url = self.parsed[0]
             if not download_url.startswith(('http://', 'https://')):
                 download_url = HTTP + download_url
 
-            self.cur_page = get(download_url)
+            self.cur_page = http_client_sync.get(download_url)
             self.parse(r'([a-z0-9]{4,}\.\w+\.\w+/download/.*?)"')
 
             final_url = self.parsed[0]
@@ -257,7 +267,7 @@ class Akwam:
             self.dl_url = None
 
     def fetch_episodes(self):
-        self.cur_page = get(self.cur_url)
+        self.cur_page = http_client_sync.get(self.cur_url)
         soup = BeautifulSoup(self.cur_page.content, 'html.parser')
         self.results = {}
         
@@ -327,7 +337,7 @@ async def get_results(
             title = title.split(":")[0]
         except:
             pass
-        decoded_data = base64.b64decode(title).decode("utf-8")
+        decoded_data = base64.urlsafe_b64decode(title).decode("utf-8")
         is_base64 = True
     except Exception:
         is_base64 = False
@@ -359,8 +369,11 @@ async def get_results(
         with ThreadPoolExecutor() as executor:
             futures = []
             for akwam_title, akwam_url in akwam_results.items():
-                if stream_type == "series":
-                    # Pour les séries, récupérer d'abord les épisodes
+                # Détecter si on a un lien direct vers un épisode spécifique
+                is_episode_direct = "/episode/" in akwam_url
+                
+                if stream_type == "series" and not is_episode_direct:
+                    # Pour les séries (page principale), récupérer tous les épisodes
                     akwam_series = Akwam('https://ak.sv/')
                     akwam_series.type = stream_type
                     akwam_series.cur_url = akwam_url
@@ -368,8 +381,8 @@ async def get_results(
                     for episode_key, episode_url in akwam_series.results.items():
                         futures.append(executor.submit(get_stream_link, episode_url, episode_key, stream_type))
                 else:
-                    # Pour les films
-                    print(f"Adding movie to process: {akwam_title}")
+                    # Pour les films OU les épisodes directs
+                    print(f"Adding item to process: {akwam_title}")
                     futures.append(executor.submit(get_stream_link, akwam_url, akwam_title, stream_type))
 
             print(f"Processing {len(futures)} items...")
@@ -456,7 +469,7 @@ async def get_catalog(
     print(f"Fetching page {page} from: {genre_url_with_page}")
 
     try:
-        entries = fetch_entries_by_genre(genre_url_with_page)
+        entries = await fetch_entries_by_genre(genre_url_with_page)
     except Exception as e:
         print(f"Error when getting page {page}: {e}")
         return JSONResponse(content={"metas": []})
@@ -467,13 +480,16 @@ async def get_catalog(
 
     metas = []
     for title, link, thumb, year, tags in paginated_entries:
+        # Utiliser le format title::url pour avoir les métadonnées complètes
+        encoded_id = base64.urlsafe_b64encode(f"{title}::{link}".encode()).decode()
         metas.append({
-            "id": f"akwam{base64.b64encode(title.encode()).decode()}",
+            "id": f"akwam{encoded_id}",
             "type": stremio_type,  # Utiliser le type Stremio original
             "name": title,
             "poster": thumb,
             "year": year,
             "genres": tags,
+            "background": thumb
         })
     print(f"Returning {len(metas)} metas (skip={skip}, limit={limit})")
     return JSONResponse(content={"metas": metas})
@@ -531,7 +547,7 @@ async def get_catalog_by_genre(
     print(f"Fetching page {page} from: {genre_url_with_page}")
 
     try:
-        entries = fetch_entries_by_genre(genre_url_with_page)
+        entries = await fetch_entries_by_genre(genre_url_with_page)
     except Exception as e:
         print(f"Error when getting page {page}: {e}")
         return JSONResponse(content={"metas": []})
@@ -542,8 +558,10 @@ async def get_catalog_by_genre(
 
     metas = []
     for title, link, thumb, year, tags in paginated_entries:
+        # Utiliser le format title::url pour avoir les métadonnées complètes
+        encoded_id = base64.urlsafe_b64encode(f"{title}::{link}".encode()).decode()
         metas.append({
-            "id": f"akwam{base64.b64encode(title.encode()).decode()}",
+            "id": f"akwam{encoded_id}",
             "type": stremio_type,  # Utiliser le type Stremio original
             "name": title,
             "poster": thumb,
@@ -577,9 +595,9 @@ async def get_catalog_with_skip(
     print(f"Fetching page {page} from: {genre_url_with_page}")
 
     try:
-        entries = fetch_entries_by_genre(genre_url_with_page)
+        entries = await fetch_entries_by_genre(genre_url_with_page)
     except Exception as e:
-        print(f"Error when getting {page}: {e}")
+        print(f"Error when getting page {page}: {e}")
         return JSONResponse(content={"metas": []})
 
     start_index = skip % limit
@@ -588,8 +606,10 @@ async def get_catalog_with_skip(
 
     metas = []
     for title, link, thumb, year, tags in paginated_entries:
+        # Utiliser le format title::url pour avoir les métadonnées complètes
+        encoded_id = base64.urlsafe_b64encode(f"{title}::{link}".encode()).decode()
         metas.append({
-            "id": f"akwam{base64.b64encode(title.encode()).decode()}",
+            "id": f"akwam{encoded_id}",
             "type": stremio_type,  # Utiliser le type Stremio original
             "name": title,
             "poster": thumb,
@@ -628,7 +648,7 @@ async def get_catalog_search(
         id_data = f"{title}::{url}"
         poster = akwam.posters.get(title, "https://via.placeholder.com/300x450?text=No+Image")
         metas.append({
-            "id": f"akwam{base64.b64encode(id_data.encode()).decode()}",
+            "id": f"akwam{base64.urlsafe_b64encode(id_data.encode()).decode()}",
             "type": catalog_type,
             "name": title,
             "poster": poster,
@@ -636,6 +656,148 @@ async def get_catalog_search(
     
     print(f"Returning {len(metas)} search results")
     return JSONResponse(content={"metas": metas})
+
+async def scrape_akwam_metadata(akwam_url, media_type='movie'):
+    """Scrape les métadonnées directement depuis la page Akwam (async)."""
+    try:
+        print(f"🔍 Scraping Akwam page: {akwam_url}")
+        response = await http_client.get(akwam_url)
+        if response.status_code != 200:
+            print(f"✗ Failed to fetch Akwam page: {response.status_code}")
+            return None
+        
+        soup = BeautifulSoup(response.content, 'html.parser')
+        metadata = {}
+        
+        # Titre
+        title_elem = soup.find('h1', class_='entry-title')
+        if title_elem:
+            metadata['name'] = title_elem.text.strip()
+        
+        # Poster
+        poster_img = soup.find('div', class_='col-lg-3').find('img') if soup.find('div', class_='col-lg-3') else None
+        if poster_img and poster_img.get('src'):
+            metadata['poster'] = poster_img['src'].replace('thumb/260x380/', '')
+        
+        # Année
+        year_match = re.search(r'السنة\s*:\s*(\d{4})', response.text)
+        if year_match:
+            metadata['year'] = year_match.group(1)
+        
+        # Description (قصة الفيلم ou قصة المسلسل)
+        story_widget = soup.find('div', class_='widget-body')
+        if story_widget:
+            story_text = story_widget.find('div', class_='text-white')
+            if story_text:
+                # Extraire le texte et nettoyer
+                desc = story_text.get_text(separator=' ', strip=True)
+                # Enlever les répétitions et nettoyer
+                desc = re.sub(r'مشاهدة و تحميل (فيلم|مسلسل) .+? حيث يدور العمل حول ', '', desc)
+                desc = re.sub(r'\s+', ' ', desc).strip()
+                # Prendre seulement le premier paragraphe s'il y a répétition
+                paragraphs = desc.split('.')
+                if paragraphs:
+                    metadata['description'] = '.'.join(paragraphs[:2]) + '.' if len(paragraphs) > 1 else paragraphs[0]
+        
+        # Genres
+        genres = []
+        genre_badges = soup.find_all('a', class_='badge badge-pill badge-light')
+        for badge in genre_badges:
+            genre_name = badge.text.strip()
+            if genre_name:
+                genres.append(genre_name)
+        metadata['genres'] = genres
+        
+        # Rating
+        rating_elem = soup.find('span', class_='mx-2')
+        if rating_elem:
+            rating_text = rating_elem.text.strip()
+            rating_match = re.search(r'(\d+\.?\d*)\s*/\s*(\d+\.?\d*)', rating_text)
+            if rating_match:
+                # Utiliser la deuxième valeur (note sur 10)
+                metadata['imdbRating'] = rating_match.group(2)
+        
+        # Background (première image de la galerie)
+        gallery_img = soup.find('a', attrs={'data-fancybox': 'movie-gallery'})
+        if gallery_img and gallery_img.get('href'):
+            metadata['background'] = gallery_img['href']
+        elif poster_img and poster_img.get('src'):
+            # Fallback: utiliser le poster comme background
+            metadata['background'] = poster_img['src'].replace('thumb/260x380/', '')
+        
+        # Pour les séries : récupérer les épisodes
+        if media_type == 'series':
+            print(f"📺 Scraping episodes for series")
+            videos = []
+            
+            # Dictionnaire pour convertir les mois arabes en numéros
+            arabic_months = {
+                'يناير': '01', 'فبراير': '02', 'مارس': '03', 'أبريل': '04',
+                'مايو': '05', 'يونيو': '06', 'يوليو': '07', 'أغسطس': '08',
+                'سبتمبر': '09', 'أكتوبر': '10', 'نوفمبر': '11', 'ديسمبر': '12'
+            }
+            
+            # Chercher tous les épisodes dans la page
+            episodes = soup.find_all('div', class_='bg-primary2')
+            for episode_div in episodes:
+                h2 = episode_div.find('h2', class_='font-size-18')
+                if not h2:
+                    continue
+                
+                link = h2.find('a')
+                if not link:
+                    continue
+                
+                episode_url = link.get('href', '')
+                episode_title = link.text.strip()
+                
+                # Extraire la date de sortie
+                date_elem = episode_div.find('p', class_='entry-date')
+                released_date = f"{metadata.get('year', '2025')}-01-01T00:00:00.000Z"  # Default
+                if date_elem:
+                    date_text = date_elem.text.strip()
+                    # Format: "السبت 01 فبراير 2020 - 10:42 صباحا"
+                    # Extraire: jour, mois (arabe), année
+                    date_match = re.search(r'(\d{2})\s+(\w+)\s+(\d{4})', date_text)
+                    if date_match:
+                        day = date_match.group(1)
+                        month_ar = date_match.group(2)
+                        year = date_match.group(3)
+                        month = arabic_months.get(month_ar, '01')
+                        released_date = f"{year}-{month}-{day}T00:00:00.000Z"
+                
+                # Extraire le numéro d'épisode depuis "حلقة 1 : ..."
+                episode_match = re.search(r'حلقة\s*(\d+)', episode_title)
+                if episode_match:
+                    episode_num = int(episode_match.group(1))
+                    
+                    # Créer l'ID encodé pour l'épisode au format: titre::url
+                    episode_id_data = f"Episode {episode_num}::{episode_url}"
+                    episode_id_encoded = base64.urlsafe_b64encode(episode_id_data.encode()).decode()
+                    
+                    # Créer l'objet vidéo au format Stremio avec la vraie date
+                    video = {
+                        "id": f"akwam{episode_id_encoded}",
+                        "title": f"Episode {episode_num}",
+                        "episode": episode_num,
+                        "season": 1,  # Pour l'instant on met toujours saison 1
+                        "released": released_date
+                    }
+                    videos.append(video)
+            
+            # Trier les épisodes par numéro
+            videos.sort(key=lambda x: x['episode'])
+            metadata['videos'] = videos
+            print(f"✓ Found {len(videos)} episodes")
+        
+        print(f"✓ Scraped metadata: {metadata.get('name', 'Unknown')}")
+        return metadata
+        
+    except Exception as e:
+        print(f"✗ Error scraping Akwam metadata: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 @app.get("/meta/{meta_type}/{meta_id}.json")
 @app.get("/{param}/meta/{meta_type}/{meta_id}.json")
@@ -647,16 +809,19 @@ async def get_meta(
     print(f"Fetching metadata for {meta_type} with ID: {meta_id}")
 
     try:
-        meta_id_decoded = base64.b64decode(meta_id.replace("akwam", "")).decode("utf-8")
+        meta_id_decoded = base64.urlsafe_b64decode(meta_id.replace("akwam", "")).decode("utf-8")
     except Exception:
         meta_id_decoded = meta_id
 
-    # Si le format contient "titre::url", extraire seulement le titre
+    # Extraire titre et URL si format "titre::url"
     if "::" in meta_id_decoded:
         title = meta_id_decoded.split("::", 1)[0]
+        akwam_url = meta_id_decoded.split("::", 1)[1]
     else:
         title = meta_id_decoded
+        akwam_url = None
 
+    # Métadonnées par défaut
     meta = {
         "id": meta_id,
         "type": meta_type,
@@ -669,6 +834,18 @@ async def get_meta(
         "cast": [],
         "imdbRating": "N/A",
     }
+
+    # Si on a l'URL Akwam, scraper les vraies infos
+    if akwam_url:
+        scraped_data = await scrape_akwam_metadata(akwam_url, meta_type)
+        if scraped_data:
+            # Mettre à jour avec les données scrapées
+            meta.update(scraped_data)
+            print(f"✨ Updated meta with scraped data from Akwam")
+        else:
+            print(f"⚠️ Could not scrape Akwam data, using defaults")
+    else:
+        print(f"⚠️ No Akwam URL in meta ID")
 
     return JSONResponse(content={"meta": meta})
 

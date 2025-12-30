@@ -1,6 +1,6 @@
 fastapi
 uvicorn
 python-dotenv
-requests
+httpx
 beautifulsoup4
 jinja2
