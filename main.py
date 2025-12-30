@@ -98,6 +98,10 @@ manifest_data = {
     "description": "Elevate your Stremio experience with seamless access to Akwam links, effortlessly",
     "behaviorHints": {
         "configurable": True,
+    },
+    "stremioAddonsConfig": {
+        "issuer": "https://stremio-addons.net",
+        "signature": "eyJhbGciOiJkaXIiLCJlbmMiOiJBMTI4Q0JDLUhTMjU2In0..29aXPXRJNsFWsz2gFgsFqQ.sgw7OlAIntZPoHdEHa2DQdMiPVoPYkyjJ_35E47bZesuYUXJm_10yxsExU4Y9SI-nWc-G4iYX_jkbyhi0tYcj3wo4PrRUzM8JGMyvFKKdzCavm_XGXd5fH5CSTQZx0Gl.i6T30jOS05htq-ZCXi6CwQ"
     }
 }
 
